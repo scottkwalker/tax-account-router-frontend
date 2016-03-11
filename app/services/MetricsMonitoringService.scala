@@ -16,8 +16,10 @@
 
 package services
 
+import akka.actor.ActorRef
 import com.codahale.metrics.MetricRegistry
 import com.kenshoo.play.metrics.MetricsRegistry
+import controllers.AuditActor
 import model.{Location, TAuditContext}
 import play.api.mvc.{AnyContent, Request}
 import uk.gov.hmrc.play.frontend.auth.AuthContext
@@ -27,12 +29,17 @@ import uk.gov.hmrc.play.http.logging.MdcLoggingExecutionContext.fromLoggingDetai
 import scala.concurrent.Future
 
 object MetricsMonitoringService extends MetricsMonitoringService {
+
+  override lazy val auditActor = AuditActor.select
+
   override val metricsRegistry: MetricRegistry = MetricsRegistry.defaultRegistry
 }
 
 trait MetricsMonitoringService {
 
   val metricsRegistry: MetricRegistry
+
+  def auditActor: Future[ActorRef]
 
   def sendMonitoringEvents(auditContext: TAuditContext, throttledLocation: Location)(implicit authContext: AuthContext, request: Request[AnyContent], hc: HeaderCarrier): Future[Unit] = {
 

@@ -16,7 +16,9 @@
 
 package controllers
 
+import akka.actor.ActorRef
 import config.AppConfigHelpers
+import controllers.AuditActor.SetSentTo2SVRegister
 import engine.Condition._
 import model.Locations._
 import model._
@@ -26,9 +28,8 @@ import uk.gov.hmrc.play.http.HeaderCarrier
 import uk.gov.hmrc.play.http.logging.MdcLoggingExecutionContext.fromLoggingDetails
 
 import scala.concurrent.Future
-import scala.util.Success
 
-trait TwoStepVerification {
+trait TwoStepVerification extends Auditing {
 
   private val conditionsByDestination = Map(
     BusinessTaxAccount -> List(not(HasStrongCredentials), GGEnrolmentsAvailable, HasSelfAssessmentEnrolments, not(HasRegisteredFor2SV))
@@ -39,6 +40,8 @@ trait TwoStepVerification {
   def twoStepVerificationPath: String
 
   def twoStepVerificationEnabled: Boolean
+
+  def auditActor: Future[ActorRef]
 
   def getDestinationVia2SV(continue: Location, ruleContext: RuleContext, auditContext: TAuditContext)(implicit authContext: AuthContext, request: Request[AnyContent], hc: HeaderCarrier) = {
 
@@ -54,7 +57,10 @@ trait TwoStepVerification {
           case true => Some(wrapLocationWith2SV(continue))
           case _ => None
         }
-      }.andThen { case Success(Some(_)) => auditContext.sentTo2SVRegister = true }
+      }.flatMap {
+        case Some(location) => withAuditing(auditActor, SetSentTo2SVRegister(authContext.user.userId))(Some(location))
+        case None => Future.successful(None)
+      }
     } else Future.successful(None)
   }
 
@@ -68,4 +74,6 @@ object TwoStepVerification extends TwoStepVerification with AppConfigHelpers {
   override lazy val twoStepVerificationPath = getConfigurationString("two-step-verification.path")
 
   override lazy val twoStepVerificationEnabled = getConfigurationBoolean("two-step-verification.enabled")
+
+  override lazy val auditActor = AuditActor.select
 }

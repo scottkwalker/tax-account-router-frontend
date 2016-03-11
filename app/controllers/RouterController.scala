@@ -114,6 +114,8 @@ object TarRules extends RuleEngine {
 
   import Condition._
 
+  override lazy val auditActor = AuditActor.select
+
   override val rules = List(
     when(LoggedInViaVerify) thenGoTo PersonalTaxAccount withName "pta-home-page-for-verify-user",
 
@@ -216,6 +218,12 @@ trait AuditActor extends Actor {
       val auditEvent = toAuditEvent(finalLocation, authContext, hc, requestPath)
       auditConnector.sendEvent(auditEvent)
       Logger.debug(s"Routing decision summary: ${auditEvent.detail \ "reasons"}")
+
+      routingReasons = routingReasons - id
+      throttlingDetails = throttlingDetails - id
+      sentTo2SVRegister = sentTo2SVRegister - id
+      ruleApplied = ruleApplied - id
+
       sender() ! Done
   }
 

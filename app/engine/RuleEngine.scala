@@ -16,6 +16,9 @@
 
 package engine
 
+import akka.actor.ActorRef
+import controllers.AuditActor.SetRuleApplied
+import controllers.Auditing
 import model.{Location, _}
 import play.api.Logger
 import play.api.mvc.{AnyContent, Request}
@@ -25,7 +28,9 @@ import uk.gov.hmrc.play.http.logging.MdcLoggingExecutionContext.fromLoggingDetai
 
 import scala.concurrent.Future
 
-trait RuleEngine {
+trait RuleEngine extends Auditing {
+
+  def auditActor: Future[ActorRef]
 
   val rules: List[Rule]
 
@@ -36,13 +41,17 @@ trait RuleEngine {
       else {
         val ruleApplyResult: Future[Option[Location]] = rule.apply(authContext, ruleContext, auditContext)
         val ruleName = rule.name
-        ruleApplyResult.map { case result =>
+        ruleApplyResult.flatMap { case result =>
           if (result.isDefined) {
-            auditContext.ruleApplied = ruleName
-            Logger.debug(s"rule applied: $ruleName")
+            withAuditing(auditActor, SetRuleApplied(authContext.user.userId, ruleName)) {
+              Logger.debug(s"rule applied: $ruleName")
+              result
+            }
           }
-          else Logger.debug(s"rule evaluated but not applied: $ruleName")
-          result
+          else Future.successful {
+            Logger.debug(s"rule evaluated but not applied: $ruleName")
+            result
+          }
         }
       })
     }

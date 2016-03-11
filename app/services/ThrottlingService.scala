@@ -177,5 +177,5 @@ object ThrottlingService extends ThrottlingService {
 
   override def hourlyLimitService: HourlyLimitService = HourlyLimitService
 
-  override def auditActor: Future[ActorRef] = AuditActor.select
+  override lazy val auditActor: Future[ActorRef] = AuditActor.select
 }
