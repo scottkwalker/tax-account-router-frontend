@@ -16,6 +16,7 @@
 
 package model
 
+import controllers.AuditActor
 import engine.Condition
 import model.RoutingReason._
 import play.api.Play
@@ -33,6 +34,8 @@ object GGEnrolmentsAvailable extends Condition {
     ruleContext.activeEnrolments.map(_ => true).recover { case _ => false}
 
   override val auditType = Some(GG_ENROLMENTS_AVAILABLE)
+
+  override def auditActor = AuditActor.select
 }
 
 trait HasAnyBusinessEnrolment extends Condition {
@@ -46,6 +49,8 @@ trait HasAnyBusinessEnrolment extends Condition {
 
 object HasAnyBusinessEnrolment extends HasAnyBusinessEnrolment {
   override lazy val businessEnrolments = Play.configuration.getString("business-enrolments").getOrElse("").split(",").map(_.trim).toSet[String]
+
+  override def auditActor = AuditActor.select
 }
 
 object SAReturnAvailable extends Condition {
@@ -53,6 +58,8 @@ object SAReturnAvailable extends Condition {
     ruleContext.lastSaReturn.map(_ => true).recover { case _ => false}
 
   override val auditType = Some(SA_RETURN_AVAILABLE)
+
+  override def auditActor = AuditActor.select
 }
 
 trait HasSelfAssessmentEnrolments extends Condition {
@@ -66,6 +73,8 @@ trait HasSelfAssessmentEnrolments extends Condition {
 
 object HasSelfAssessmentEnrolments extends HasSelfAssessmentEnrolments {
   override lazy val selfAssessmentEnrolments = Play.configuration.getString("self-assessment-enrolments").getOrElse("").split(",").map(_.trim).toSet[String]
+
+  override def auditActor = AuditActor.select
 }
 
 object HasPreviousReturns extends Condition {
@@ -74,6 +83,8 @@ object HasPreviousReturns extends Condition {
     ruleContext.lastSaReturn.map(_.previousReturns)
 
   override val auditType = Some(HAS_PREVIOUS_RETURNS)
+
+  override def auditActor = AuditActor.select
 }
 
 object IsInAPartnership extends Condition {
@@ -81,6 +92,8 @@ object IsInAPartnership extends Condition {
 
   override def isTrue(authContext: AuthContext, ruleContext: RuleContext)(implicit request: Request[AnyContent], hc: HeaderCarrier) =
     ruleContext.lastSaReturn.map(_.partnership)
+
+  override def auditActor = AuditActor.select
 }
 
 object IsSelfEmployed extends Condition {
@@ -88,6 +101,8 @@ object IsSelfEmployed extends Condition {
 
   override def isTrue(authContext: AuthContext, ruleContext: RuleContext)(implicit request: Request[AnyContent], hc: HeaderCarrier) =
     ruleContext.lastSaReturn.map(_.selfEmployment)
+
+  override def auditActor = AuditActor.select
 }
 
 object LoggedInViaVerify extends Condition {
@@ -95,6 +110,8 @@ object LoggedInViaVerify extends Condition {
     Future.successful(!request.session.data.contains("token"))
 
   override val auditType = Some(IS_A_VERIFY_USER)
+
+  override def auditActor = AuditActor.select
 }
 
 object LoggedInViaGovernmentGateway extends Condition {
@@ -102,6 +119,8 @@ object LoggedInViaGovernmentGateway extends Condition {
     Future.successful(request.session.data.contains("token"))
 
   override val auditType = Some(IS_A_GOVERNMENT_GATEWAY_USER)
+
+  override def auditActor = AuditActor.select
 }
 
 object HasNino extends Condition {
@@ -109,12 +128,16 @@ object HasNino extends Condition {
     Future.successful(authContext.principal.accounts.paye.isDefined)
 
   override val auditType = Some(HAS_NINO)
+
+  override def auditActor = AuditActor.select
 }
 
 object AnyOtherRuleApplied extends Condition {
   override val auditType = None
 
   override def isTrue(authContext: AuthContext, ruleContext: RuleContext)(implicit request: Request[AnyContent], hc: HeaderCarrier) = Future.successful(true)
+
+  override def auditActor = AuditActor.select
 }
 
 object HasSaUtr extends Condition {
@@ -122,6 +145,8 @@ object HasSaUtr extends Condition {
 
   override def isTrue(authContext: AuthContext, ruleContext: RuleContext)(implicit request: Request[AnyContent], hc: HeaderCarrier) =
     Future.successful(authContext.principal.accounts.sa.isDefined)
+
+  override def auditActor = AuditActor.select
 }
 
 object HasRegisteredFor2SV extends Condition {
@@ -129,6 +154,8 @@ object HasRegisteredFor2SV extends Condition {
 
   override def isTrue(authContext: AuthContext, ruleContext: RuleContext)(implicit request: Request[AnyContent], hc: HeaderCarrier) =
     ruleContext.currentCoAFEAuthority.map(_.twoFactorAuthOtpId.isDefined)
+
+  override def auditActor = AuditActor.select
 }
 
 object HasStrongCredentials extends Condition {
@@ -136,4 +163,6 @@ object HasStrongCredentials extends Condition {
 
   override def isTrue(authContext: AuthContext, ruleContext: RuleContext)(implicit request: Request[AnyContent], hc: HeaderCarrier) =
     Future.successful(authContext.user.credentialStrength == CredentialStrength.Strong)
+
+  override def auditActor = AuditActor.select
 }

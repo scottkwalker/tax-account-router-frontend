@@ -16,10 +16,13 @@
 
 package controllers
 
-import akka.actor.{Actor, ActorSystem, Props}
+import akka.actor._
 import auth.RouterAuthenticationProvider
+import config.FrontendGlobal._
 import config.{FrontendAppConfig, FrontendAuditConnector}
 import connector.FrontendAuthConnector
+import controllers.AuditActor.AuditMessage
+import controllers.AuditSupervisor.CreateActor
 import engine.{Condition, RuleEngine}
 import model.Locations._
 import model.RoutingReason.RoutingReason
@@ -36,6 +39,7 @@ import uk.gov.hmrc.play.frontend.auth._
 import uk.gov.hmrc.play.frontend.controller.FrontendController
 import uk.gov.hmrc.play.http.HeaderCarrier
 
+import scala.concurrent.duration.DurationInt
 import scala.concurrent.{ExecutionContext, Future}
 
 object RouterController extends RouterController {
@@ -129,12 +133,28 @@ object TarRules extends RuleEngine {
 
     when(AnyOtherRuleApplied) thenGoTo BusinessTaxAccount withName "bta-home-page-passed-through"
   )
-
-  private val system = ActorSystem("actor-system")
-
-  val auditActor = system.actorOf(Props(new AuditActor {}), "audit-actor")
 }
 
+class AuditSupervisor extends Actor {
+
+  import akka.actor.OneForOneStrategy
+  import akka.actor.SupervisorStrategy._
+
+  override val supervisorStrategy =
+    OneForOneStrategy(maxNrOfRetries = 0) {
+      case e: Exception => Resume
+    }
+
+  def receive = {
+    case p: CreateActor => sender() ! context.actorOf(p.props, p.name)
+  }
+}
+
+object AuditSupervisor {
+
+  case class CreateActor(props: Props, name: String)
+
+}
 
 trait AuditActor extends Actor {
 
@@ -161,8 +181,9 @@ trait AuditActor extends Actor {
       val current = routingReasons.getOrElse(id, Map.empty[String, String])
       val updated = current + (auditEventType.key -> result.toString)
       routingReasons = routingReasons + (id -> updated)
+      sender() ! Done
 
-    case ThrottlingDetails(id, throttlingAuditContext) =>
+    case SetThrottlingDetails(id, throttlingAuditContext) =>
       val current = throttlingDetails.getOrElse(id, Map.empty[String, String])
       val details = Map[String, String](
         "enabled" -> throttlingAuditContext.throttlingEnabled.asString,
@@ -174,14 +195,20 @@ trait AuditActor extends Actor {
       )
       val updated = current ++ details
       throttlingDetails = throttlingDetails + (id -> updated)
+      sender() ! Done
 
-    case SentTo2SVRegister(id) => sentTo2SVRegister = sentTo2SVRegister + (id -> true)
+    case SetSentTo2SVRegister(id) =>
+      sentTo2SVRegister = sentTo2SVRegister + (id -> true)
+      sender() ! Done
 
-    case RuleApplied(id, rule) => ruleApplied = ruleApplied + (id -> rule)
+    case SetRuleApplied(id, rule) =>
+      ruleApplied = ruleApplied + (id -> rule)
+      sender() ! Done
+      PoisonPill
 
-    case GetReasons(id) => routingReasons.getOrElse(id, Map.empty[String, String])
+    case GetReasons(id) => sender() ! routingReasons.getOrElse(id, Map.empty[String, String])
 
-    case GetThrottlingDetails(id) => throttlingDetails.getOrElse(id, Map.empty[String, String])
+    case GetThrottlingDetails(id) => sender() ! throttlingDetails.getOrElse(id, Map.empty[String, String])
 
     case SendAuditEvent(id, finalLocation, authContext, hc, requestPath) =>
       implicit val headerCarrier = hc
@@ -189,6 +216,7 @@ trait AuditActor extends Actor {
       val auditEvent = toAuditEvent(finalLocation, authContext, hc, requestPath)
       auditConnector.sendEvent(auditEvent)
       Logger.debug(s"Routing decision summary: ${auditEvent.detail \ "reasons"}")
+      sender() ! Done
   }
 
   private def toAuditEvent(location: Location, authContext: AuthContext, hc: HeaderCarrier, requestPath: String): ExtendedDataEvent = {
@@ -215,19 +243,32 @@ trait AuditActor extends Actor {
   }
 }
 
+trait Auditing {
+
+  import akka.pattern._
+  import config.FrontendGlobal.timeout
+
+  def withAuditing[T](actorRef: Future[ActorRef], auditMessage: AuditMessage)(block: => T)(implicit ec: ExecutionContext): Future[T] = actorRef.flatMap { actor =>
+    val auditDone = actor ? auditMessage
+    auditDone.map(_ => block)
+  }
+}
+
 object AuditActor {
 
   sealed trait AuditMessage {
     def id: String
   }
 
+  case object Done
+
   case class SetRoutingReason(override val id: String, auditEventType: RoutingReason, result: Boolean) extends AuditMessage
 
-  case class ThrottlingDetails(override val id: String, throttlingAuditContext: ThrottlingAuditContext) extends AuditMessage
+  case class SetThrottlingDetails(override val id: String, throttlingAuditContext: ThrottlingAuditContext) extends AuditMessage
 
-  case class SentTo2SVRegister(override val id: String) extends AuditMessage
+  case class SetSentTo2SVRegister(override val id: String) extends AuditMessage
 
-  case class RuleApplied(override val id: String, rule: String) extends AuditMessage
+  case class SetRuleApplied(override val id: String, rule: String) extends AuditMessage
 
   case class GetReasons(override val id: String) extends AuditMessage
 
@@ -235,4 +276,5 @@ object AuditActor {
 
   case class SendAuditEvent(override val id: String, finalLocation: Location, authContext: AuthContext, hc: HeaderCarrier, requestPath: String) extends AuditMessage
 
+  def select: Future[ActorRef] = actorSystem.actorSelection("/user/supervisor/auditor").resolveOne()(5 seconds)
 }

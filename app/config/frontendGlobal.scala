@@ -16,7 +16,12 @@
 
 package config
 
+import akka.actor.{ActorSystem, Props}
+import akka.pattern._
+import akka.util.Timeout
 import com.typesafe.config.Config
+import controllers.AuditSupervisor.CreateActor
+import controllers.{AuditActor, AuditSupervisor}
 import net.ceedubs.ficus.Ficus._
 import play.api.mvc.Request
 import play.api.{Application, Configuration, Play}
@@ -27,6 +32,8 @@ import uk.gov.hmrc.play.config.{AppName, ControllerConfig, RunMode}
 import uk.gov.hmrc.play.frontend.bootstrap.DefaultFrontendGlobal
 import uk.gov.hmrc.play.http.logging.filters.FrontendLoggingFilter
 
+import scala.concurrent.Await
+import scala.concurrent.duration.DurationInt
 
 object FrontendGlobal
   extends DefaultFrontendGlobal {
@@ -34,10 +41,28 @@ object FrontendGlobal
   override val auditConnector = FrontendAuditConnector
   override val loggingFilter = LoggingFilter
   override val frontendAuditFilter = AuditFilter
+  val actorSystem = ActorSystem("actor-system")
 
   override def onStart(app: Application) {
     super.onStart(app)
     ApplicationCrypto.verifyConfiguration()
+
+    createActors()
+  }
+
+  val defaultTimeout = 10 seconds
+  implicit val timeout = Timeout.durationToTimeout(defaultTimeout)
+
+  override def onStop(app: Application): Unit = {
+    super.onStop(app)
+    actorSystem.shutdown()
+    actorSystem.awaitTermination(defaultTimeout)
+  }
+
+  def createActors() = {
+    val auditSupervisor = actorSystem.actorOf(Props[AuditSupervisor], "supervisor")
+    val auditActorRef = auditSupervisor ? CreateActor(Props[AuditActor], "auditor")
+    Await.ready(auditActorRef, defaultTimeout)
   }
 
   override def standardErrorTemplate(pageTitle: String, heading: String, message: String)(implicit rh: Request[_]): Html =

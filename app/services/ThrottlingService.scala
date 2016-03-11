@@ -16,6 +16,9 @@
 
 package services
 
+import akka.actor.ActorRef
+import controllers.AuditActor.SetThrottlingDetails
+import controllers.{AuditActor, Auditing}
 import cryptography.Encryption
 import model.Locations._
 import model.{Location, _}
@@ -32,7 +35,9 @@ import uk.gov.hmrc.play.frontend.auth.AuthContext
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Random, Success}
 
-trait ThrottlingService extends BSONBuilderHelpers {
+trait ThrottlingService extends BSONBuilderHelpers with Auditing {
+
+  def auditActor: Future[ActorRef]
 
   def random: Random
 
@@ -95,8 +100,11 @@ trait ThrottlingService extends BSONBuilderHelpers {
                   val throttledLocation = stickyRoutingApplied match {
                     case true =>
                       val finalLocation = Locations.find(routingInfo.throttledDestination).get
-                      auditContext.setThrottlingDetails(ThrottlingAuditContext(throttlingPercentage = None, initialLocation != finalLocation, initialLocation, throttlingEnabled, stickyRoutingApplied))
-                      Future(finalLocation)
+
+                      withAuditing(auditActor, SetThrottlingDetails(authContext.user.userId, ThrottlingAuditContext(throttlingPercentage = None, initialLocation != finalLocation, initialLocation, throttlingEnabled, stickyRoutingApplied))) {
+                        finalLocation
+                      }
+
                     case false =>
                       doThrottling(initialLocation, auditContext, userId)
                   }
@@ -168,4 +176,6 @@ object ThrottlingService extends ThrottlingService {
   override def encryption: Encryption = Encryption
 
   override def hourlyLimitService: HourlyLimitService = HourlyLimitService
+
+  override def auditActor: Future[ActorRef] = AuditActor.select
 }

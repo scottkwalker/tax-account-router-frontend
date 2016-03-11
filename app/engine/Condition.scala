@@ -16,6 +16,9 @@
 
 package engine
 
+import akka.actor.ActorRef
+import controllers.AuditActor.SetRoutingReason
+import controllers.Auditing
 import model.RoutingReason.RoutingReason
 import model.{RuleContext, TAuditContext}
 import play.api.mvc.{AnyContent, Request}
@@ -24,27 +27,36 @@ import uk.gov.hmrc.play.http.HeaderCarrier
 import uk.gov.hmrc.play.http.logging.MdcLoggingExecutionContext.fromLoggingDetails
 
 import scala.concurrent.Future
-import scala.util.Success
 
 object Condition {
   def not(condition: Condition): Condition = new CompositeCondition {
     override def evaluate(authContext: AuthContext, ruleContext: RuleContext, auditContext: TAuditContext)(implicit request: Request[AnyContent], hc: HeaderCarrier): Future[Boolean] =
       condition.evaluate(authContext, ruleContext, auditContext).map(!_)
+
+    override def auditActor: Future[ActorRef] = condition.auditActor
   }
 
   def when(condition: Condition): When = When(condition)
 }
 
-trait Condition {
+trait Condition extends Auditing {
 
   self =>
 
   val auditType: Option[RoutingReason]
 
+  def auditActor: Future[ActorRef]
+
   def isTrue(authContext: AuthContext, ruleContext: RuleContext)(implicit request: Request[AnyContent], hc: HeaderCarrier): Future[Boolean]
 
   def evaluate(authContext: AuthContext, ruleContext: RuleContext, auditContext: TAuditContext)(implicit request: Request[AnyContent], hc: HeaderCarrier): Future[Boolean] = {
-    this.isTrue(authContext, ruleContext).andThen { case Success(result) if auditType.isDefined => auditContext.setRoutingReason(auditType.get, result) }
+    this.isTrue(authContext, ruleContext).flatMap { result =>
+      if (auditType.isEmpty) Future.successful(result)
+      else
+        withAuditing(auditActor, SetRoutingReason(authContext.user.userId, auditType.get, result)) {
+          result
+        }
+    }
   }
 
   def and(other: Condition): Condition = new CompositeCondition {
@@ -53,6 +65,8 @@ trait Condition {
       val condition1FutureResult: Future[Boolean] = self.evaluate(authContext, ruleContext, auditContext)
       condition1FutureResult.flatMap(c1r => if (c1r) other.evaluate(authContext, ruleContext, auditContext).map(c2r => c1r && c2r) else condition1FutureResult)
     }
+
+    override def auditActor: Future[ActorRef] = self.auditActor
   }
 
   def or(other: Condition): Condition = new CompositeCondition {
@@ -61,5 +75,7 @@ trait Condition {
       val condition1FutureResult: Future[Boolean] = self.evaluate(authContext, ruleContext, auditContext)
       condition1FutureResult.flatMap(c1r => if (c1r) condition1FutureResult else other.evaluate(authContext, ruleContext, auditContext))
     }
+
+    override def auditActor: Future[ActorRef] = self.auditActor
   }
 }
