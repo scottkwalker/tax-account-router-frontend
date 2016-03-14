@@ -21,7 +21,7 @@ import auth.RouterAuthenticationProvider
 import config.FrontendGlobal._
 import config.{FrontendAppConfig, FrontendAuditConnector}
 import connector.FrontendAuthConnector
-import controllers.AuditActor.AuditMessage
+import controllers.AuditActor.{AuditMessage, SendAuditEvent}
 import controllers.AuditSupervisor.CreateActor
 import engine.{Condition, RuleEngine}
 import model.Locations._
@@ -58,6 +58,8 @@ object RouterController extends RouterController {
   override def auditConnector = FrontendAuditConnector
 
   override def createAuditContext() = AuditContext()
+
+  override lazy val auditActor = AuditActor.select
 }
 
 trait RouterController extends FrontendController with Actions {
@@ -76,6 +78,8 @@ trait RouterController extends FrontendController with Actions {
 
   def createAuditContext(): TAuditContext
 
+  def auditActor: Future[ActorRef]
+
   val account = AuthenticatedBy(authenticationProvider = RouterAuthenticationProvider, pageVisibility = AllowAll).async { implicit user => request => route(user, request) }
 
   def route(implicit authContext: AuthContext, request: Request[AnyContent]): Future[Result] = {
@@ -91,7 +95,7 @@ trait RouterController extends FrontendController with Actions {
       destinationAfterThrottleApplied <- throttlingService.throttle(destinationAfterRulesApplied, auditContext)
       finalDestination <- twoStepVerification.getDestinationVia2SV(destinationAfterThrottleApplied, ruleContext, auditContext).map(_.getOrElse(destinationAfterThrottleApplied))
     } yield {
-      sendAuditEvent(auditContext, destinationAfterThrottleApplied)
+      auditActor.foreach(_ ! SendAuditEvent(authContext.user.userId, destinationAfterThrottleApplied, authContext, hc, request.path))
       metricsMonitoringService.sendMonitoringEvents(auditContext, destinationAfterThrottleApplied)
       Logger.debug(s"routing to: ${finalDestination.name}")
       sendGAEventAndRedirect(auditContext, finalDestination)
@@ -100,13 +104,6 @@ trait RouterController extends FrontendController with Actions {
 
   private def sendGAEventAndRedirect(auditContext: TAuditContext, finalDestination: Location) = {
     Ok(views.html.uplift(finalDestination, auditContext.ruleApplied, FrontendAppConfig.analyticsToken))
-  }
-
-  private def sendAuditEvent(auditContext: TAuditContext, throttledLocation: Location)(implicit authContext: AuthContext, request: Request[AnyContent], hc: HeaderCarrier) = {
-    auditContext.toAuditEvent(throttledLocation).foreach { auditEvent =>
-      auditConnector.sendEvent(auditEvent)
-      Logger.debug(s"Routing decision summary: ${auditEvent.detail \ "reasons"}")
-    }
   }
 }
 
@@ -158,7 +155,7 @@ object AuditSupervisor {
 
 }
 
-trait AuditActor extends Actor {
+class AuditActor extends Actor {
 
   import AuditActor._
 
@@ -178,9 +175,11 @@ trait AuditActor extends Actor {
     def asString: String = if (value) "true" else "false"
   }
 
+  def defaultRoutingReasons = RoutingReason.allReasons.map(reason => reason.key -> "-").toMap
+
   override def receive = {
     case SetRoutingReason(id, auditEventType, result) =>
-      val current = routingReasons.getOrElse(id, Map.empty[String, String])
+      val current = routingReasons.getOrElse(id, defaultRoutingReasons)
       val updated = current + (auditEventType.key -> result.toString)
       routingReasons = routingReasons + (id -> updated)
       sender() ! Done
@@ -206,7 +205,6 @@ trait AuditActor extends Actor {
     case SetRuleApplied(id, rule) =>
       ruleApplied = ruleApplied + (id -> rule)
       sender() ! Done
-      PoisonPill
 
     case GetReasons(id) => sender() ! routingReasons.getOrElse(id, Map.empty[String, String])
 
@@ -223,8 +221,6 @@ trait AuditActor extends Actor {
       throttlingDetails = throttlingDetails - id
       sentTo2SVRegister = sentTo2SVRegister - id
       ruleApplied = ruleApplied - id
-
-      sender() ! Done
   }
 
   private def toAuditEvent(location: Location, authContext: AuthContext, hc: HeaderCarrier, requestPath: String): ExtendedDataEvent = {
@@ -243,9 +239,9 @@ trait AuditActor extends Actor {
       detail = Json.obj(
         "authId" -> authContext.user.userId,
         "destination" -> location.url,
-        "reasons" -> routingReasons,
-        "throttling" -> throttlingDetails,
-        "ruleApplied" -> ruleApplied
+        "reasons" -> routingReasons.getOrElse(authContext.user.userId, throw new RuntimeException("Missing routing reasons")),
+        "throttling" -> throttlingDetails.getOrElse(authContext.user.userId, throw new RuntimeException("Missing throttling details")),
+        "ruleApplied" -> ruleApplied.getOrElse(authContext.user.userId, throw new RuntimeException("Missing rule applied"))
       ) ++ optionalAccounts
     )
   }

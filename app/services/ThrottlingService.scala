@@ -84,11 +84,12 @@ trait ThrottlingService extends BSONBuilderHelpers with Auditing {
 
   def throttle(initialLocation: Location, auditContext: TAuditContext)(implicit request: Request[AnyContent], authContext: AuthContext, ex: ExecutionContext): Future[Location] = {
 
-    val userId = encryption.getSha256(authContext.user.userId)
+    val userId = authContext.user.userId
+    val encryptedUserId = encryption.getSha256(userId)
 
     stickyRoutingEnabled match {
       case true =>
-        routingCacheRepository.findById(Id(userId)).flatMap { optionalCache =>
+        routingCacheRepository.findById(Id(encryptedUserId)).flatMap { optionalCache =>
 
           optionalCache.flatMap { cache =>
 
@@ -101,16 +102,16 @@ trait ThrottlingService extends BSONBuilderHelpers with Auditing {
                     case true =>
                       val finalLocation = Locations.find(routingInfo.throttledDestination).get
 
-                      withAuditing(auditActor, SetThrottlingDetails(authContext.user.userId, ThrottlingAuditContext(throttlingPercentage = None, initialLocation != finalLocation, initialLocation, throttlingEnabled, stickyRoutingApplied))) {
+                      withAuditing(auditActor, SetThrottlingDetails(userId, ThrottlingAuditContext(throttlingPercentage = None, initialLocation != finalLocation, initialLocation, throttlingEnabled, stickyRoutingApplied))) {
                         finalLocation
                       }
 
                     case false =>
-                      doThrottling(initialLocation, auditContext, userId)
+                      doThrottling(initialLocation, auditContext, userId, encryptedUserId)
                   }
 
                   throttledLocation.andThen {
-                    case Success(tLocation) => createOrUpdateRoutingCache(initialLocation, tLocation, userId)
+                    case Success(tLocation) => createOrUpdateRoutingCache(initialLocation, tLocation, encryptedUserId)
                   }
                 case JsError(e) =>
                   Logger.error(s"Error reading document $e")
@@ -119,25 +120,27 @@ trait ThrottlingService extends BSONBuilderHelpers with Auditing {
             }
 
           }.getOrElse {
-            val throttledLocation = doThrottling(initialLocation, auditContext, userId)
+            val throttledLocation = doThrottling(initialLocation, auditContext, userId, encryptedUserId)
             throttledLocation.andThen {
-              case Success(tLocation) => createOrUpdateRoutingCache(initialLocation, tLocation, userId)
+              case Success(tLocation) => createOrUpdateRoutingCache(initialLocation, tLocation, encryptedUserId)
             }
           }
         }
       case false =>
-        val throttledLocation = doThrottling(initialLocation, auditContext, userId)
+        val throttledLocation = doThrottling(initialLocation, auditContext, userId, encryptedUserId)
         throttledLocation.andThen {
-          case Success(tLocation) => createOrUpdateRoutingCache(initialLocation, tLocation, userId)
+          case Success(tLocation) => createOrUpdateRoutingCache(initialLocation, tLocation, encryptedUserId)
         }
     }
   }
 
-  def doThrottling(location: Location, auditContext: TAuditContext, userId: String)(implicit request: Request[AnyContent], ex: ExecutionContext): Future[Location] = {
+  private def doThrottling(location: Location, auditContext: TAuditContext, userId: String, encryptedUserId: String)(implicit request: Request[AnyContent], ex: ExecutionContext): Future[Location] = {
     throttlingEnabled match {
       case false =>
-        auditContext.setThrottlingDetails(ThrottlingAuditContext(throttlingPercentage = None, throttled = false, location, throttlingEnabled, stickyRoutingApplied = false))
-        Future(location)
+        withAuditing(auditActor, SetThrottlingDetails(userId, ThrottlingAuditContext(throttlingPercentage = None, throttled = false, location, throttlingEnabled, stickyRoutingApplied = false))) {
+          location
+        }
+
       case true =>
         val configurationForLocation = findConfigurationFor(location)
         val throttlingChanceOption = findPercentageToThrottleFor(configurationForLocation)
@@ -147,7 +150,7 @@ trait ThrottlingService extends BSONBuilderHelpers with Auditing {
           case x if x <= throttlingChance => Future(Locations.find(findFallbackFor(configurationForLocation, location)).getOrElse(location))
           case _ =>
             val fallbackLocation = Locations.find(findFallbackFor(configurationForLocation, location)).getOrElse(location)
-            hourlyLimitService.applyHourlyLimit(location, fallbackLocation, userId, findConfigurationFor(location))
+            hourlyLimitService.applyHourlyLimit(location, fallbackLocation, encryptedUserId, findConfigurationFor(location))
         }
 
         finalLocation.andThen {
